@@ -212,9 +212,6 @@ func main() {
 	fmt.Println("data saved to 1000.json")
 }
 
-//took avg of ~3.31 seconds per user with 10 workers
-//took avg of 0.49 seconds per user with 100 workers (= 70+% cpu usage and 4gb ram :skull:)
-
 // save user cookies so that about me section can be accessed
 // cookies := browser.MustGetCookies()
 // fmt.Println(cookies)
