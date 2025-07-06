@@ -66,6 +66,8 @@ func getFriends(userID int) ([]int, error) {
 	return friends, nil
 }
 
+var numCollected int = 0
+
 func collectFor(userID int, browser *rod.Browser) UserData {
 	fmt.Printf("collecting for user %d\n", userID)
 
@@ -86,6 +88,7 @@ func collectFor(userID int, browser *rod.Browser) UserData {
 		return data
 	}
 	data.Exists = true
+	numCollected++
 
 	//get data
 	profileHeaderNames := page.MustElementsByJS(`() => document.querySelector(".profile-header-names").children`)
@@ -131,8 +134,8 @@ func collectFor(userID int, browser *rod.Browser) UserData {
 }
 
 const StartID = 1
-const UsersToCollect = 100
-const NumWorkers = 10
+const UsersToCollect = 1000
+const NumWorkers = 100
 
 func worker(id int, jobs <-chan int, results chan<- UserData, browserPool chan *rod.Browser) {
 	for userID := range jobs {
@@ -191,7 +194,7 @@ func main() {
 	for i := 0; i < UsersToCollect; i++ {
 		userData := <-results
 		users[i] = userData
-		fmt.Printf("Collected data for user %d (%d/%d)\n", userData.ID, i+1, UsersToCollect)
+		fmt.Printf("collected data for user %d (%d/%d)\n", userData.ID, i+1, UsersToCollect)
 	}
 
 	// clean up
@@ -200,10 +203,13 @@ func main() {
 		browser.MustClose()
 	}
 
+
+	fmt.Printf("collected data for %d valid users\n", numCollected)
+	
 	// save
 	json, _ := json.Marshal(users)
-	os.WriteFile("out.json", json, 0644)
-	fmt.Println("data saved to out.json")
+	os.WriteFile("1000.json", json, 0644)
+	fmt.Println("data saved to 1000.json")
 }
 
 //took avg of ~3.31 seconds per user with 10 workers
