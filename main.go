@@ -208,3 +208,20 @@ func main() {
 
 //took avg of ~3.31 seconds per user with 10 workers
 //took avg of 0.49 seconds per user with 100 workers (= 70+% cpu usage and 4gb ram :skull:)
+
+// save user cookies so that about me section can be accessed
+// cookies := browser.MustGetCookies()
+// fmt.Println(cookies)
+
+// // save cookies to cookies.bin
+// cookieFile, err := os.Create("cookies.bin")
+// if err != nil {
+// 	panic(fmt.Sprintf("Failed to create cookie file: %v", err))
+// }
+// defer cookieFile.Close()
+
+// encoder := gob.NewEncoder(cookieFile)
+// if err := encoder.Encode(cookies); err != nil {
+// 	panic(fmt.Sprintf("Failed to save cookies: %v", err))
+// }
+// fmt.Println("cookies saved to cookies.bin")
