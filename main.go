@@ -3,8 +3,9 @@ package main
 import (
 	"encoding/base64"
 	"encoding/gob"
-	
+	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"strconv"
 	"strings"
@@ -15,37 +16,75 @@ import (
 )
 
 type UserData struct {
-	id             int
-	name           string
-	displayName    string
-	about          string
-	pfpURL         string
-	verified       bool
-	joinDate       string
-	placeVisits    int
-	followersCount int
-	followingCount int
-	friendCount    int
-	friends        []int
+	ID             int    `json:"id"`
+	Exists         bool   `json:"exists"`
+	Name           string `json:"name"`
+	DisplayName    string `json:"displayName"`
+	About          string `json:"about"`
+	PfpURL         string `json:"pfpURL"`
+	Verified       bool   `json:"verified"`
+	JoinDate       string `json:"joinDate"`
+	PlaceVisits    int    `json:"placeVisits"`
+	FollowersCount int    `json:"followersCount"`
+	FollowingCount int    `json:"followingCount"`
+	FriendCount    int    `json:"friendCount"`
+	Friends        []int  `json:"friends"`
 }
 
-func collectFor(userID int, browser *rod.Browser) {
+type FriendData struct {
+	ID int `json:"id"`
+	Name string `json:"name"`
+	DisplayName string `json:"displayName"`
+}
+
+type FriendsResp struct {
+	Data []FriendData `json:"data"`
+}
+
+func getFriends(userID int) ([]int, error) {
+	url := fmt.Sprintf("https://friends.roblox.com/v1/users/%d/friends", userID)
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get friends: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("failed to get friends, status code: %d", resp.StatusCode)
+	}
+
+	var friendsData FriendsResp
+	if err := json.NewDecoder(resp.Body).Decode(&friendsData); err != nil {
+		return nil, fmt.Errorf("failed to decode response: %v", err)
+	}
+
+	friends := make([]int, len(friendsData.Data))
+	for i, friend := range friendsData.Data {
+		friends[i] = friend.ID
+	}
+
+	return friends, nil
+}
+
+func collectFor(userID int, browser *rod.Browser) (UserData) {
 	fmt.Printf("collecting for user %d\n", userID)
 
 	var data UserData
-	data.id = userID
+	data.ID = userID
 
 	page := browser.MustPage(fmt.Sprintf("https://www.roblox.com/users/%d/profile", userID))
 
 	//screenshot
-	page.MustWaitStable().MustScreenshot(fmt.Sprintf("%d.png", userID))
+	page.MustWaitStable()//.MustScreenshot(fmt.Sprintf("%d.png", userID))
 	fmt.Println("screenshot")
 
 	//check if user exists
 	if page.MustHas(`#content > div > div > div.message-container > h3`) {
 		fmt.Println("user does not exist")
-		return
+		data.Exists = false
+		return data
 	}
+	data.Exists = true
 
 	//get data
 	profileHeaderNames := page.MustElementsByJS(`() => document.querySelector(".profile-header-names").children`)
@@ -64,30 +103,34 @@ func collectFor(userID int, browser *rod.Browser) {
 	placeVisits := page.MustElement(`#profile-statistics-container > div > ul > li:nth-child(2) > span.MuiTypography-root.web-blox-css-tss-hzyup-Typography-body1-Typography-root.MuiTypography-inherit.web-blox-css-mui-clml2g`)
 	fmt.Println("place visits")
 
-	data.name = profileHeaderNames[1].MustText()
-	data.displayName = profileHeaderTitle[0].MustText()
-	data.verified = len(profileHeaderTitle) > 1
-	data.friendCount, _ = strconv.Atoi(strings.Split(socialData[0].MustText(), " ")[0])
-	data.followersCount, _ = strconv.Atoi(strings.Split(socialData[1].MustText(), " ")[0])
-	data.followingCount, _ = strconv.Atoi(strings.Split(socialData[2].MustText(), " ")[0])
+	data.Name = profileHeaderNames[1].MustText()
+	data.DisplayName = profileHeaderTitle[0].MustText()
+	data.Verified = len(profileHeaderTitle) > 1
+	data.FriendCount, _ = strconv.Atoi(strings.Split(socialData[0].MustText(), " ")[0])
+	data.FollowersCount, _ = strconv.Atoi(strings.Split(socialData[1].MustText(), " ")[0])
+	data.FollowingCount, _ = strconv.Atoi(strings.Split(socialData[2].MustText(), " ")[0])
 	
 	if *aboutContainer.MustDescribe().ChildNodeCount > 0 {
 		about := page.MustElementByJS(`() => document.querySelector(".profile-about-content-text")`)
-		data.about = about.MustText()
+		data.About = about.MustText()
 	} else {
-		data.about = ""
+		data.About = ""
 	}
 
-	data.joinDate = joinDate.MustText()
+	data.JoinDate = joinDate.MustText()
 
 	placeVisitsStr := strings.ReplaceAll(strings.Split(placeVisits.MustText(), " ")[0], ",", "")
-	data.placeVisits, _ = strconv.Atoi(placeVisitsStr)
+	data.PlaceVisits, _ = strconv.Atoi(placeVisitsStr)
 
 	pfpResource := pfpImage.MustResource()
-	data.pfpURL = fmt.Sprintf("data:image/png;base64,%s", base64.StdEncoding.EncodeToString(pfpResource))
+	data.PfpURL = fmt.Sprintf("data:image/png;base64,%s", base64.StdEncoding.EncodeToString(pfpResource))
+	data.Friends, _ = getFriends(userID)
 
-	fmt.Println(data)
+	return data
 }
+
+const StartID = 1
+const UsersToCollect = 1
 
 func main() {
 	//path, _ := launcher.LookPath()
@@ -112,7 +155,22 @@ func main() {
 		browser.MustSetCookies(cookies...)
 	}
 
-	collectFor(1, browser)
+	var users []UserData
+
+	for i := StartID; i < StartID+UsersToCollect; i++ {
+		users = append(users, collectFor(i, browser))
+	}
+
+	//save data
+	// file, err := os.Create("out.json")
+	// if err != nil {
+	// 	panic(fmt.Sprintf("Failed to create data file: %v", err))
+	// }
+	// defer file.Close()
+
+	json, _ := json.Marshal(users)
+	os.WriteFile("out.json", json, 0644)
+	fmt.Println("data saved to out.json")
 
 	// save user cookies so that about me section can be accessed
 	// cookies := browser.MustGetCookies()
