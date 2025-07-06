@@ -32,8 +32,8 @@ type UserData struct {
 }
 
 type FriendData struct {
-	ID int `json:"id"`
-	Name string `json:"name"`
+	ID          int    `json:"id"`
+	Name        string `json:"name"`
 	DisplayName string `json:"displayName"`
 }
 
@@ -66,16 +66,17 @@ func getFriends(userID int) ([]int, error) {
 	return friends, nil
 }
 
-func collectFor(userID int, browser *rod.Browser) (UserData) {
+func collectFor(userID int, browser *rod.Browser) UserData {
 	fmt.Printf("collecting for user %d\n", userID)
 
 	var data UserData
 	data.ID = userID
 
 	page := browser.MustPage(fmt.Sprintf("https://www.roblox.com/users/%d/profile", userID))
+	defer page.Close()
 
 	//screenshot
-	page.MustWaitStable()//.MustScreenshot(fmt.Sprintf("%d.png", userID))
+	page.MustWaitStable() //.MustScreenshot(fmt.Sprintf("%d.png", userID))
 	fmt.Println("screenshot")
 
 	//check if user exists
@@ -109,7 +110,7 @@ func collectFor(userID int, browser *rod.Browser) (UserData) {
 	data.FriendCount, _ = strconv.Atoi(strings.Split(socialData[0].MustText(), " ")[0])
 	data.FollowersCount, _ = strconv.Atoi(strings.Split(socialData[1].MustText(), " ")[0])
 	data.FollowingCount, _ = strconv.Atoi(strings.Split(socialData[2].MustText(), " ")[0])
-	
+
 	if *aboutContainer.MustDescribe().ChildNodeCount > 0 {
 		about := page.MustElementByJS(`() => document.querySelector(".profile-about-content-text")`)
 		data.About = about.MustText()
@@ -130,62 +131,80 @@ func collectFor(userID int, browser *rod.Browser) (UserData) {
 }
 
 const StartID = 1
-const UsersToCollect = 1
+const UsersToCollect = 100
+const NumWorkers = 10
+
+func worker(id int, jobs <-chan int, results chan<- UserData, browserPool chan *rod.Browser) {
+	for userID := range jobs {
+		browser := <-browserPool
+		userData := collectFor(userID, browser)
+		browserPool <- browser
+		results <- userData
+	}
+}
 
 func main() {
-	//path, _ := launcher.LookPath()
 	u := launcher.New().Headless(true).Leakless(false).MustLaunch()
-	browser := rod.New().ControlURL(u).MustConnect()
 
-	// load cookies
-	if _, err := os.Stat("cookies.bin"); err == nil {
-		cookieFile, err := os.Open("cookies.bin")
-		if err != nil {
-			panic(fmt.Sprintf("failed to open cookie file: %v", err))
+	// create browser pool
+	browserPool := make(chan *rod.Browser, NumWorkers)
+	for i := 0; i < NumWorkers; i++ {
+		browser := rod.New().ControlURL(u).MustConnect()
+
+		// load cookies
+		if _, err := os.Stat("cookies.bin"); err == nil {
+			cookieFile, err := os.Open("cookies.bin")
+			if err != nil {
+				panic(fmt.Sprintf("failed to open cookie file: %v", err))
+			}
+
+			decoder := gob.NewDecoder(cookieFile)
+			var cookies []*proto.NetworkCookie
+			if err := decoder.Decode(&cookies); err != nil {
+				panic(fmt.Sprintf("failed to load cookies: %v", err))
+			}
+			cookieFile.Close()
+			fmt.Printf("Browser %d: cookies loaded from cookies.bin\n", i)
+
+			browser.MustSetCookies(cookies...)
 		}
-		defer cookieFile.Close()
 
-		decoder := gob.NewDecoder(cookieFile)
-		var cookies []*proto.NetworkCookie
-		if err := decoder.Decode(&cookies); err != nil {
-			panic(fmt.Sprintf("failed to load cookies: %v", err))
-		}
-		fmt.Println("cookies loaded from cookies.bin")
-
-		browser.MustSetCookies(cookies...)
+		browserPool <- browser
 	}
 
-	var users []UserData
+	jobs := make(chan int, UsersToCollect)
+	results := make(chan UserData, UsersToCollect)
 
+	// start
+	for w := 1; w <= NumWorkers; w++ {
+		go worker(w, jobs, results, browserPool)
+	}
+
+	// send jobs
 	for i := StartID; i < StartID+UsersToCollect; i++ {
-		users = append(users, collectFor(i, browser))
+		jobs <- i
+	}
+	close(jobs)
+
+	// collect
+	users := make([]UserData, UsersToCollect)
+	for i := 0; i < UsersToCollect; i++ {
+		userData := <-results
+		users[i] = userData
+		fmt.Printf("Collected data for user %d (%d/%d)\n", userData.ID, i+1, UsersToCollect)
 	}
 
-	//save data
-	// file, err := os.Create("out.json")
-	// if err != nil {
-	// 	panic(fmt.Sprintf("Failed to create data file: %v", err))
-	// }
-	// defer file.Close()
+	// clean up
+	for i := 0; i < NumWorkers; i++ {
+		browser := <-browserPool
+		browser.MustClose()
+	}
 
+	// save
 	json, _ := json.Marshal(users)
 	os.WriteFile("out.json", json, 0644)
 	fmt.Println("data saved to out.json")
-
-	// save user cookies so that about me section can be accessed
-	// cookies := browser.MustGetCookies()
-	// fmt.Println(cookies)
-
-	// // save cookies to cookies.bin
-	// cookieFile, err := os.Create("cookies.bin")
-	// if err != nil {
-	// 	panic(fmt.Sprintf("Failed to create cookie file: %v", err))
-	// }
-	// defer cookieFile.Close()
-
-	// encoder := gob.NewEncoder(cookieFile)
-	// if err := encoder.Encode(cookies); err != nil {
-	// 	panic(fmt.Sprintf("Failed to save cookies: %v", err))
-	// }
-	// fmt.Println("cookies saved to cookies.bin")
 }
+
+//took avg of ~3.31 seconds per user with 10 workers
+//took avg of 0.49 seconds per user with 100 workers (= 70+% cpu usage and 4gb ram :skull:)
