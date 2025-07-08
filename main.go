@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	//"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -66,6 +67,17 @@ func getFriends(userID int) ([]int, error) {
 	return friends, nil
 }
 
+func isBanned(userID int) bool {
+	url := fmt.Sprintf("https://www.roblox.com/users/%d/profile", userID)
+	resp, err := http.Get(url)
+	if err != nil {
+		return true
+	}
+	defer resp.Body.Close()
+
+	return resp.StatusCode == http.StatusNotFound
+}
+
 var numCollected int = 0
 
 func collectFor(userID int, browser *rod.Browser) UserData {
@@ -74,6 +86,14 @@ func collectFor(userID int, browser *rod.Browser) UserData {
 	var data UserData
 	data.ID = userID
 
+	//check if user exists
+	banned := isBanned(userID)
+	if banned {
+		fmt.Println("user does not exist")
+		data.Exists = false
+		return data
+	}
+
 	page := browser.MustPage(fmt.Sprintf("https://www.roblox.com/users/%d/profile", userID))
 	defer page.Close()
 
@@ -81,7 +101,7 @@ func collectFor(userID int, browser *rod.Browser) UserData {
 	page.MustWaitStable() //.MustScreenshot(fmt.Sprintf("%d.png", userID))
 	fmt.Println("screenshot")
 
-	//check if user exists
+	//secondary check if user exists (shouldn't be needed)
 	if page.MustHas(`#content > div > div > div.message-container > h3`) {
 		fmt.Println("user does not exist")
 		data.Exists = false
@@ -134,8 +154,8 @@ func collectFor(userID int, browser *rod.Browser) UserData {
 }
 
 const StartID = 1
-const UsersToCollect = 1000
-const NumWorkers = 100
+const UsersToCollect = 100
+const NumWorkers = 10
 
 func worker(id int, jobs <-chan int, results chan<- UserData, browserPool chan *rod.Browser) {
 	for userID := range jobs {
@@ -147,11 +167,12 @@ func worker(id int, jobs <-chan int, results chan<- UserData, browserPool chan *
 }
 
 func main() {
-	u := launcher.New().Headless(true).Leakless(false).MustLaunch()
+	
 
 	// create browser pool
 	browserPool := make(chan *rod.Browser, NumWorkers)
 	for i := 0; i < NumWorkers; i++ {
+		u := launcher.New().Headless(true).Leakless(false).MustLaunch()
 		browser := rod.New().ControlURL(u).MustConnect()
 
 		// load cookies
@@ -208,8 +229,8 @@ func main() {
 	
 	// save
 	json, _ := json.Marshal(users)
-	os.WriteFile("1000.json", json, 0644)
-	fmt.Println("data saved to 1000.json")
+	os.WriteFile("500.json", json, 0644)
+	fmt.Println("data saved to 500.json")
 }
 
 // save user cookies so that about me section can be accessed
