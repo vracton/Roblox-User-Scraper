@@ -13,8 +13,9 @@ Unfortunately, this scraper is rather slow. On my machine, it took an average of
 
 
 *NEW*
-With fixed multithreading, 100 users takes 10 workers 0.73 seconds per user.
-With better existence checking, 100 users takes 10 workers 0.56 seconds per user.
+- With fixed multithreading, 100 users takes 10 workers 0.73 seconds per user.
+- With better existence checking, 100 users takes 10 workers 0.56 seconds per user.
+- It took 5 minutes to get data for 497 (there's an error which always pauses here...) users with 15 workers.
 
 ## Data Format
 
