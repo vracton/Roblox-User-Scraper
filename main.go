@@ -175,116 +175,122 @@ func worker(id int, jobs <-chan int, results chan<- UserData, browserPool chan *
 }
 
 func main() {
-	//setup signal handling for no loss shutdown
-	sigChan := make(chan os.Signal, 1)
-	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
+	command := os.Args[1]
+	
+	if command == "" || command == "collect" {
+		//setup signal handling for no loss shutdown
+		sigChan := make(chan os.Signal, 1)
+		signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
-	// create browser pool
-	browserPool := make(chan *rod.Browser, NumWorkers)
-	var browsers []*rod.Browser //keep track of all browsers for cleanup
+		// create browser pool
+		browserPool := make(chan *rod.Browser, NumWorkers)
+		var browsers []*rod.Browser
 
-	for i := 0; i < NumWorkers; i++ {
-		u := launcher.New().Headless(true).Leakless(false).MustLaunch()
-		browser := rod.New().ControlURL(u).MustConnect()
-		browsers = append(browsers, browser)
+		for i := 0; i < NumWorkers; i++ {
+			u := launcher.New().Headless(true).Leakless(false).MustLaunch()
+			browser := rod.New().ControlURL(u).MustConnect()
+			browsers = append(browsers, browser)
 
-		// load cookies
-		if _, err := os.Stat("cookies.bin"); err == nil {
-			cookieFile, err := os.Open("cookies.bin")
-			if err != nil {
-				panic(fmt.Sprintf("failed to open cookie file: %v", err))
+			// load cookies
+			if _, err := os.Stat("cookies.bin"); err == nil {
+				cookieFile, err := os.Open("cookies.bin")
+				if err != nil {
+					panic(fmt.Sprintf("failed to open cookie file: %v", err))
+				}
+
+				decoder := gob.NewDecoder(cookieFile)
+				var cookies []*proto.NetworkCookie
+				if err := decoder.Decode(&cookies); err != nil {
+					panic(fmt.Sprintf("failed to load cookies: %v", err))
+				}
+				cookieFile.Close()
+				fmt.Printf("Browser %d: cookies loaded from cookies.bin\n", i)
+
+				browser.MustSetCookies(cookies...)
 			}
 
-			decoder := gob.NewDecoder(cookieFile)
-			var cookies []*proto.NetworkCookie
-			if err := decoder.Decode(&cookies); err != nil {
-				panic(fmt.Sprintf("failed to load cookies: %v", err))
+			browserPool <- browser
+		}
+
+		jobs := make(chan int, UsersToCollect)
+		results := make(chan UserData, UsersToCollect)
+		done := make(chan bool, 1)
+
+		// start workers
+		for w := 1; w <= NumWorkers; w++ {
+			go worker(w, jobs, results, browserPool)
+		}
+
+		// send jobs in goroutine
+		go func() {
+			for i := StartID; i < StartID+UsersToCollect; i++ {
+				jobs <- i
 			}
-			cookieFile.Close()
-			fmt.Printf("Browser %d: cookies loaded from cookies.bin\n", i)
+			close(jobs)
+		}()
 
-			browser.MustSetCookies(cookies...)
-		}
-
-		browserPool <- browser
-	}
-
-	jobs := make(chan int, UsersToCollect)
-	results := make(chan UserData, UsersToCollect)
-	done := make(chan bool, 1)
-
-	// start workers
-	for w := 1; w <= NumWorkers; w++ {
-		go worker(w, jobs, results, browserPool)
-	}
-
-	// send jobs in goroutine
-	go func() {
-		for i := StartID; i < StartID+UsersToCollect; i++ {
-			jobs <- i
-		}
-		close(jobs)
-	}()
-
-	// collect results in goroutine
-	go func() {
-		users := make([]UserData, 0, UsersToCollect)
-		collected := 0
-		
-		for userData := range results {
-			users = append(users, userData)
-			collected++
-			fmt.Printf("collected data for user %d (%d/%d)\n", userData.ID, collected, UsersToCollect)
+		// collect results in goroutine
+		go func() {
+			users := make([]UserData, 0, UsersToCollect)
+			collected := 0
 			
-			// update global collected users for potential early save
+			for userData := range results {
+				users = append(users, userData)
+				collected++
+				fmt.Printf("collected data for user %d (%d/%d)\n", userData.ID, collected, UsersToCollect)
+				
+				// update global collected users for potential early save
+				usersMutex.Lock()
+				collectedUsers = append(collectedUsers[:0], users...)
+				usersMutex.Unlock()
+				
+				if collected >= UsersToCollect {
+					// save final data
+					jsonData, _ := json.Marshal(users)
+					os.WriteFile("500.json", jsonData, 0644)
+					fmt.Println("data saved to 500.json")
+					done <- true
+					return
+				}
+			}
+			done <- true
+		}()
+
+		//wait for completion or interrupt
+		select {
+		case <-done:
+			fmt.Println("Collection completed successfully!")
+		case <-sigChan:
+			fmt.Println("\nReceived interrupt signal. Shutting down gracefully...")
+			
+			//give workers a moment to finish current tasks
+			time.Sleep(2 * time.Second)
+			
+			//close results channel to stop collection
+			close(results)
+			
+			//save partial data
 			usersMutex.Lock()
-			collectedUsers = append(collectedUsers[:0], users...)
-			usersMutex.Unlock()
-			
-			if collected >= UsersToCollect {
-				// save final data
-				jsonData, _ := json.Marshal(users)
-				os.WriteFile("500.json", jsonData, 0644)
-				fmt.Println("data saved to 500.json")
-				done <- true
-				return
+			if len(collectedUsers) > 0 {
+				jsonData, _ := json.Marshal(collectedUsers)
+				filename := fmt.Sprintf("partial_%d_users.json", len(collectedUsers))
+				os.WriteFile(filename, jsonData, 0644)
+				fmt.Printf("Saved %d users to %s\n", len(collectedUsers), filename)
 			}
+			usersMutex.Unlock()
 		}
-		done <- true
-	}()
 
-	//wait for completion or interrupt
-	select {
-	case <-done:
-		fmt.Println("Collection completed successfully!")
-	case <-sigChan:
-		fmt.Println("\nReceived interrupt signal. Shutting down gracefully...")
-		
-		//give workers a moment to finish current tasks
-		time.Sleep(2 * time.Second)
-		
-		//close results channel to stop collection
-		close(results)
-		
-		//save partial data
-		usersMutex.Lock()
-		if len(collectedUsers) > 0 {
-			jsonData, _ := json.Marshal(collectedUsers)
-			filename := fmt.Sprintf("partial_%d_users.json", len(collectedUsers))
-			os.WriteFile(filename, jsonData, 0644)
-			fmt.Printf("Saved %d users to %s\n", len(collectedUsers), filename)
+		// Clean up all browsers
+		fmt.Println("cleaning up browsers")
+		for _, browser := range browsers {
+			browser.MustClose()
 		}
-		usersMutex.Unlock()
-	}
 
-	// Clean up all browsers
-	fmt.Println("cleaning up browsers")
-	for _, browser := range browsers {
-		browser.MustClose()
+		fmt.Printf("collected data for %d valid users\n", numCollected)
+		fmt.Println("Cleanup complete. Exiting...")
+	} else if command == "trim" && len(os.Args[2]) > 5 {
+		trim(os.Args[2])
 	}
-
-	fmt.Printf("collected data for %d valid users\n", numCollected)
-	fmt.Println("Cleanup complete. Exiting...")
 }
 
 // save user cookies so that about me section can be accessed
