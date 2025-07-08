@@ -8,8 +8,12 @@ import (
 	"net/http"
 	//"net/url"
 	"os"
+	"os/signal"
 	"strconv"
 	"strings"
+	"sync"
+	"syscall"
+	"time"
 
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
@@ -78,7 +82,11 @@ func isBanned(userID int) bool {
 	return resp.StatusCode == http.StatusNotFound
 }
 
-var numCollected int = 0
+var (
+	numCollected int = 0
+	collectedUsers []UserData
+	usersMutex sync.Mutex
+)
 
 func collectFor(userID int, browser *rod.Browser) UserData {
 	fmt.Printf("collecting for user %d\n", userID)
@@ -154,8 +162,8 @@ func collectFor(userID int, browser *rod.Browser) UserData {
 }
 
 const StartID = 1
-const UsersToCollect = 100
-const NumWorkers = 10
+const UsersToCollect = 500
+const NumWorkers = 15
 
 func worker(id int, jobs <-chan int, results chan<- UserData, browserPool chan *rod.Browser) {
 	for userID := range jobs {
@@ -167,13 +175,18 @@ func worker(id int, jobs <-chan int, results chan<- UserData, browserPool chan *
 }
 
 func main() {
-	
+	//setup signal handling for no loss shutdown
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 
 	// create browser pool
 	browserPool := make(chan *rod.Browser, NumWorkers)
+	var browsers []*rod.Browser //keep track of all browsers for cleanup
+
 	for i := 0; i < NumWorkers; i++ {
 		u := launcher.New().Headless(true).Leakless(false).MustLaunch()
 		browser := rod.New().ControlURL(u).MustConnect()
+		browsers = append(browsers, browser)
 
 		// load cookies
 		if _, err := os.Stat("cookies.bin"); err == nil {
@@ -198,39 +211,80 @@ func main() {
 
 	jobs := make(chan int, UsersToCollect)
 	results := make(chan UserData, UsersToCollect)
+	done := make(chan bool, 1)
 
-	// start
+	// start workers
 	for w := 1; w <= NumWorkers; w++ {
 		go worker(w, jobs, results, browserPool)
 	}
 
-	// send jobs
-	for i := StartID; i < StartID+UsersToCollect; i++ {
-		jobs <- i
-	}
-	close(jobs)
+	// send jobs in goroutine
+	go func() {
+		for i := StartID; i < StartID+UsersToCollect; i++ {
+			jobs <- i
+		}
+		close(jobs)
+	}()
 
-	// collect
-	users := make([]UserData, UsersToCollect)
-	for i := 0; i < UsersToCollect; i++ {
-		userData := <-results
-		users[i] = userData
-		fmt.Printf("collected data for user %d (%d/%d)\n", userData.ID, i+1, UsersToCollect)
+	// collect results in goroutine
+	go func() {
+		users := make([]UserData, 0, UsersToCollect)
+		collected := 0
+		
+		for userData := range results {
+			users = append(users, userData)
+			collected++
+			fmt.Printf("collected data for user %d (%d/%d)\n", userData.ID, collected, UsersToCollect)
+			
+			// update global collected users for potential early save
+			usersMutex.Lock()
+			collectedUsers = append(collectedUsers[:0], users...)
+			usersMutex.Unlock()
+			
+			if collected >= UsersToCollect {
+				// save final data
+				jsonData, _ := json.Marshal(users)
+				os.WriteFile("500.json", jsonData, 0644)
+				fmt.Println("data saved to 500.json")
+				done <- true
+				return
+			}
+		}
+		done <- true
+	}()
+
+	//wait for completion or interrupt
+	select {
+	case <-done:
+		fmt.Println("Collection completed successfully!")
+	case <-sigChan:
+		fmt.Println("\nReceived interrupt signal. Shutting down gracefully...")
+		
+		//give workers a moment to finish current tasks
+		time.Sleep(2 * time.Second)
+		
+		//close results channel to stop collection
+		close(results)
+		
+		//save partial data
+		usersMutex.Lock()
+		if len(collectedUsers) > 0 {
+			jsonData, _ := json.Marshal(collectedUsers)
+			filename := fmt.Sprintf("partial_%d_users.json", len(collectedUsers))
+			os.WriteFile(filename, jsonData, 0644)
+			fmt.Printf("Saved %d users to %s\n", len(collectedUsers), filename)
+		}
+		usersMutex.Unlock()
 	}
 
-	// clean up
-	for i := 0; i < NumWorkers; i++ {
-		browser := <-browserPool
+	// Clean up all browsers
+	fmt.Println("cleaning up browsers")
+	for _, browser := range browsers {
 		browser.MustClose()
 	}
 
-
 	fmt.Printf("collected data for %d valid users\n", numCollected)
-	
-	// save
-	json, _ := json.Marshal(users)
-	os.WriteFile("500.json", json, 0644)
-	fmt.Println("data saved to 500.json")
+	fmt.Println("Cleanup complete. Exiting...")
 }
 
 // save user cookies so that about me section can be accessed
